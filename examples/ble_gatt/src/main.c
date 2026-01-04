@@ -12,6 +12,13 @@ LOG_MODULE_REGISTER(main);
 #include <zephyr/bluetooth/bluetooth.h>
 #include <zephyr/bluetooth/conn.h>
 #include <zephyr/drivers/gpio.h>
+#include <zephyr/kernel.h>
+#include <zephyr/sys/printk.h>
+
+#include <zephyr/shell/shell.h>
+
+#include "sensors/sensor.h"
+#include "sensors/ph_sensor.h"
 
 #include <pouch/pouch.h>
 #include <pouch/events.h>
@@ -67,11 +74,11 @@ static void connected(struct bt_conn *conn, uint8_t err)
 {
     if (err)
     {
-        LOG_DBG("Connection failed (err 0x%02x)", err);
+        LOG_INF("Connection failed (err 0x%02x)", err);
     }
     else
     {
-        LOG_DBG("Connected");
+        LOG_INF("Connected");
         default_conn = conn;
     }
 }
@@ -89,7 +96,7 @@ K_WORK_DELAYABLE_DEFINE(disconnect_work, disconnect_work_handler);
 
 static void disconnected(struct bt_conn *conn, uint8_t reason)
 {
-    LOG_DBG("Disconnected (reason 0x%02x)", reason);
+    LOG_INF("Disconnected (reason 0x%02x)", reason);
 
     default_conn = NULL;
 
@@ -150,12 +157,15 @@ void sync_request_work_handler(struct k_work *work)
 {
     service_data.data.flags |= POUCH_GATT_ADV_FLAG_SYNC_REQUEST;
     bt_le_adv_update_data(ad, ARRAY_SIZE(ad), NULL, 0);
+    LOG_INF("Sync request flag set in advertisement");
 }
 
 K_WORK_DELAYABLE_DEFINE(sync_request_work, sync_request_work_handler);
 
 static void pouch_event_handler(enum pouch_event event, void *ctx)
 {
+    LOG_INF("Pouch event: %d", event);
+
     if (POUCH_EVENT_SESSION_START == event)
     {
         pouch_uplink_entry_write(".s/sensor",
@@ -164,11 +174,15 @@ static void pouch_event_handler(enum pouch_event event, void *ctx)
                                  sizeof("{\"temp\":22}") - 1,
                                  K_FOREVER);
 
+        sensors_pouch_session_start();
+
         golioth_sync_to_cloud();
     }
 
     if (POUCH_EVENT_SESSION_END == event)
     {
+        sensors_pouch_session_end();
+
         service_data.data.flags &= ~POUCH_GATT_ADV_FLAG_SYNC_REQUEST;
         bt_le_adv_update_data(ad, ARRAY_SIZE(ad), NULL, 0);
         k_work_schedule(&sync_request_work, K_SECONDS(CONFIG_EXAMPLE_SYNC_PERIOD_S));
@@ -191,11 +205,106 @@ static int led_setting_cb(bool new_value)
 
 GOLIOTH_SETTINGS_HANDLER(LED, led_setting_cb);
 
+/*
+ * pH calibration shell commands
+ *
+ * Usage:
+ *   ph calib-low <ph>
+ *   ph calib-high <ph>
+ *   ph calib-guided [low_ph] [high_ph]
+ */
+
+static int cmd_ph_calib_low(const struct shell *sh, size_t argc, char **argv)
+{
+    if (argc < 2) {
+        shell_error(sh, "Usage: ph calib-low <ph>");
+        return -EINVAL;
+    }
+
+    float ph = strtof(argv[1], NULL);
+    int err = ph_sensor_calibrate_low(ph);
+    if (err) {
+        shell_error(sh, "Calibration failed (err %d)", err);
+    } else {
+        shell_print(sh, "Captured low-point calibration at pH=%.3f", (double)ph);
+    }
+
+    return err;
+}
+
+static int cmd_ph_calib_high(const struct shell *sh, size_t argc, char **argv)
+{
+    if (argc < 2) {
+        shell_error(sh, "Usage: ph calib-high <ph>");
+        return -EINVAL;
+    }
+
+    float ph = strtof(argv[1], NULL);
+    int err = ph_sensor_calibrate_high(ph);
+    if (err) {
+        shell_error(sh, "Calibration failed (err %d)", err);
+    } else {
+        shell_print(sh, "Captured high-point calibration at pH=%.3f", (double)ph);
+    }
+
+    return err;
+}
+
+static int cmd_ph_calib_guided(const struct shell *sh, size_t argc, char **argv)
+{
+    float low_ph = 7.0f;
+    float high_ph = 4.0f;
+
+    if (argc >= 2) {
+        low_ph = strtof(argv[1], NULL);
+    }
+    if (argc >= 3) {
+        high_ph = strtof(argv[2], NULL);
+    }
+
+    shell_print(sh, "Guided calibration (non-interactive): low=%.2f high=%.2f",
+                (double)low_ph, (double)high_ph);
+    shell_print(sh, "Make sure the probe is in the LOW buffer (%.2f) before running,",
+                (double)low_ph);
+    shell_print(sh, "then move it to the HIGH buffer (%.2f) when instructed.",
+                (double)high_ph);
+
+    int err = ph_sensor_calibrate_low(low_ph);
+    if (err) {
+        shell_error(sh, "Low-point calibration failed (err %d)", err);
+        return err;
+    }
+
+    shell_print(sh, "Low-point captured. Now move the probe to the HIGH buffer and run the command again if needed, or use ph calib-high.");
+
+    /* For safety, do not automatically capture the high point here.
+     * Users can explicitly call ph calib-high <ph> after moving the probe.
+     */
+    return 0;
+}
+
+SHELL_STATIC_SUBCMD_SET_CREATE(ph_sub,
+    SHELL_CMD(calib-low, NULL, "Capture low-point calibration: ph calib-low <ph>", cmd_ph_calib_low),
+    SHELL_CMD(calib-high, NULL, "Capture high-point calibration: ph calib-high <ph>", cmd_ph_calib_high),
+    SHELL_CMD(calib-guided, NULL, "Run guided two-point calibration: ph calib-guided [low_ph] [high_ph]", cmd_ph_calib_guided),
+    SHELL_SUBCMD_SET_END
+);
+
+SHELL_CMD_REGISTER(ph, &ph_sub, "pH sensor commands", NULL);
+
 int main(void)
 {
+    printk("ble_gatt node booting\r\n");
     LOG_INF("Pouch SDK Version: " STRINGIFY(APP_BUILD_VERSION));
     LOG_INF("Pouch Protocol Version: %d", POUCH_VERSION);
     LOG_INF("Pouch BLE Transport Protocol Version: %d", POUCH_GATT_VERSION);
+
+    /* Inform the user how to perform calibration from the serial console. */
+    printk("\r\nTo calibrate the pH sensor, use shell commands: \r\n");
+    printk("  ph calib-low <ph>   (e.g. ph calib-low 7.00)\r\n");
+    printk("  ph calib-high <ph>  (e.g. ph calib-high 4.00)\r\n");
+    printk("or start with: ph calib-guided 7.00 4.00\r\n");
+    printk("If you do not wish to calibrate now, ignore this message and the node will continue.\r\n");
 
     int err = pouch_gatt_peripheral_init();
     if (err)
@@ -287,6 +396,11 @@ int main(void)
 
         gpio_init_callback(&button_cb_data, button_pressed, BIT(button.pin));
         gpio_add_callback(button.port, &button_cb_data);
+    }
+
+    err = sensors_init_all();
+    if (err) {
+        LOG_ERR("Sensors init failed (err %d)", err);
     }
 
     k_work_schedule(&sync_request_work, K_SECONDS(CONFIG_EXAMPLE_SYNC_PERIOD_S));

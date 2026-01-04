@@ -1,0 +1,49 @@
+/ {
+	chosen {
+		/* Use QSPI NOR as Partition Manager external flash */
+		nordic,pm-ext-flash = &p25q16h;
+	};
+
+	fstab {
+		compatible = "zephyr,fstab";
+		lfs1: lfs1 {
+			compatible = "zephyr,fstab,littlefs";
+			mount-point = "/lfs1";
+			partition = <&storage_partition>;
+			automount;
+			read-size = <16>;
+			prog-size = <16>;
+			cache-size = <64>;
+			lookahead-size = <32>;
+			block-cycles = <512>;
+		};
+	};
+
+	water_detect3 {
+		compatible = "mikroe,water-detect3";
+		/* INT connected to XIAO D2 via Stratus Pro pin 20 wiring */
+		int-gpios = <&xiao_d 2 GPIO_ACTIVE_HIGH>;
+	};
+};
+
+&flash0 {
+	partitions {
+		slot0_partition: partition@e000 {
+			label = "slot0";
+			reg = <0x0000E000 0x00061000>;
+		};
+	};
+};
+
+&p25q16h {
+	partitions {
+		compatible = "fixed-partitions";
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		slot1_partition: partition@0 {
+			label = "slot1";
+			reg = <0x00000000 0x00061000>;
+		};
+	};
+};
