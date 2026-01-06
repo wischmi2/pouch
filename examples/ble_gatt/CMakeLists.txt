@@ -14,4 +14,5 @@ target_sources(app PRIVATE
   src/fw_update.c
   src/sensors/sensors.c
   src/sensors/water_sensor.c
-  src/sensors/ph_sensor.c)
+  src/sensors/ph_sensor.c
+  src/sensors/solar_sensor.c)
